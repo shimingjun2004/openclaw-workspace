@@ -1,0 +1,33 @@
+# 个人数据（不上云）
+memory/
+
+# 配置文件（含API keys/tokens）
+.config/
+*.json
+!package.json
+
+# Python缓存
+__pycache__/
+*.pyc
+skills/__pycache__/
+skills/**/__pycache__/
+
+# Node_modules（过大且可从package.json重建）
+skills/last30days-official/node_modules/
+skills/last30days-official/scripts/node_modules/
+
+# Git目录
+.git/
+
+# 临时文件
+/tmp/
+*.tmp
+*.log
+
+# OpenClaw内部文件
+*.sock
+*.socket
+
+# 备份文件
+*.bak
+*.backup
