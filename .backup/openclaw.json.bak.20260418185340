@@ -1,0 +1,125 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "/root/.openclaw/workspace",
+      "model": {
+        "primary": "minimax-anthropic/MiniMax-M2.7"
+      },
+      "models": {
+        "custom-openai-aiworkcloud-com-cn/Qwen/Qwen3.5-35B-A3B-FP8": {
+          "alias": "dgx-qwen35"
+        }
+      }
+    }
+  },
+  "gateway": {
+    "mode": "local",
+    "auth": {
+      "mode": "token",
+      "token": "ef0d3aa747649b58a45e6fbd933881a0a9c8813323d8e460"
+    },
+    "port": 18789,
+    "bind": "loopback",
+    "tailscale": {
+      "mode": "off",
+      "resetOnExit": false
+    },
+    "controlUi": {
+      "allowInsecureAuth": true
+    },
+    "nodes": {
+      "denyCommands": [
+        "camera.snap",
+        "camera.clip",
+        "screen.record",
+        "contacts.add",
+        "calendar.add",
+        "reminders.add",
+        "sms.send",
+        "sms.search"
+      ]
+    }
+  },
+  "session": {
+    "dmScope": "per-channel-peer"
+  },
+  "tools": {
+    "profile": "coding"
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "custom-openai-aiworkcloud-com-cn": {
+        "baseUrl": "http://openai.aiworkcloud.com.cn/v1",
+        "api": "openai-completions",
+        "apiKey": "aiwork123",
+        "models": [
+          {
+            "id": "Qwen/Qwen3.5-35B-A3B-FP8",
+            "name": "Qwen/Qwen3.5-35B-A3B-FP8 (Custom Provider)",
+            "contextWindow": 64000,
+            "maxTokens": 1024,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "reasoning": false
+          }
+        ]
+      },
+      "minimax-anthropic": {
+        "api": "anthropic-messages",
+        "auth": "api-key",
+        "apiKey": "sk-cp-fviW-o5Yr-is2b8yjfZQxwOmuRsk0saxEkfKp40kSqZv1SZ1KAPofTkYYoFFDpaowv_CgTCBMY6fepak51zoBS9tEHjpUDVc07syMqVC2DebBWCpnRu-JQs",
+        "baseUrl": "https://api.minimaxi.com/anthropic",
+        "models": [
+          {
+            "id": "MiniMax-M2.7",
+            "name": "MiniMax-M2.7",
+            "reasoning": true,
+            "input": [
+              "text"
+            ],
+            "contextWindow": 204800
+          }
+        ]
+      }
+    }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "groups": {
+        "*": {
+          "requireMention": true
+        }
+      },
+      "botToken": "8693981607:AAHuIipX0tyC-2h9TsbIcfBc3DVUxtojp-8"
+    }
+  },
+  "browser": {
+    "enabled": true
+  },
+  "wizard": {
+    "lastRunAt": "2026-04-10T08:29:22.986Z",
+    "lastRunVersion": "2026.4.9",
+    "lastRunCommand": "onboard",
+    "lastRunMode": "local"
+  },
+  "meta": {
+    "lastTouchedVersion": "2026.4.15",
+    "lastTouchedAt": "2026-04-18T10:16:55.702Z"
+  },
+  "plugins": {
+    "entries": {
+      "browser": {
+        "enabled": true
+      }
+    }
+  }
+}
