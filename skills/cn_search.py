@@ -429,6 +429,80 @@ def search_github(query, limit=5):
 # 两段式搜索
 # ═══════════════════════════════════════════════════════
 
+
+def _auto_scale(query, ranked, mode, all_results):
+    """
+    按需扩容：去重后发现覆盖不足，智能增加返回条数。
+
+    触发条件（任意一个）：
+      1. 去重后总条数 < 8
+      2. 有效来源渠道数 < 3
+      3. broad 意图（比较/对比/方案/调研/趋势/推荐）
+      4. 前5条标题相似度 > 50%
+
+    扩容策略：
+      normal:  追加 Tavily 3条（不再受 limit 限制）
+      deep:     追加 Tavily 4条 + 触发 GitHub
+    """
+    intents = _detect_query_intent(query)
+    broad_intents = {'compare', 'explain', 'news'}
+    is_broad = bool(intents and any(i in broad_intents for i in intents))
+
+    # 简单相似度检测：前5条中，含相同关键词对数超过50%即视为重复
+    titles = [item['title'].lower() for item in ranked[:5]]
+    similar_pairs = 0
+    for i, t1 in enumerate(titles):
+        kw1 = set(c for c in t1 if '\u4e00' <= c <= '\u9fff')
+        for t2 in titles[i+1:]:
+            kw2 = set(c for c in t2 if '\u4e00' <= c <= '\u9fff')
+            if kw1 and kw2:
+                overlap = len(kw1 & kw2) / min(len(kw1), len(kw2))
+                if overlap > 0.5:
+                    similar_pairs += 1
+
+    active_sources = sum(1 for ch, items in all_results.items() if items)
+    trigger_reasons = []
+    if len(ranked) < 8:
+        trigger_reasons.append(f"结果少({len(ranked)}条)")
+    if active_sources < 3:
+        trigger_reasons.append(f"来源少({active_sources}个)")
+    if is_broad:
+        trigger_reasons.append("broad意图")
+    if similar_pairs > len(titles) * 0.4:
+        trigger_reasons.append("标题相似")
+
+    if not trigger_reasons:
+        return ranked
+
+    print(f"  [扩容] 触发原因: {'; '.join(trigger_reasons)}")
+
+    scaled = list(ranked)
+    added = 0
+
+    # normal: 追加 Tavily 结果（不走 limit 限制）
+    if mode in ("normal", "fast"):
+        tavily_items = all_results.get("Tavily", [])
+        existing_urls = {item["url"] for item in ranked}
+        for item in tavily_items:
+            if item["url"] not in existing_urls and added < 3:
+                scaled.append(item)
+                added += 1
+
+    # deep: 追加更多 Tavily + 保留 GitHub（已在 r3 里，这里做补充）
+    elif mode == "deep":
+        tavily_items = all_results.get("Tavily", [])
+        existing_urls = {item["url"] for item in ranked}
+        for item in tavily_items:
+            if item["url"] not in existing_urls and added < 4:
+                scaled.append(item)
+                added += 1
+
+    if added:
+        print(f"  [扩容] 已追加 {added} 条，结果从 {len(ranked)} → {len(scaled)} 条")
+
+    return scaled
+
+
 def deduplicate_and_rank(all_results):
     """
     第二段：去重 + 重排
@@ -465,7 +539,17 @@ def deduplicate_and_rank(all_results):
 
     # 权重排序，同权重按标题字顺序
     scored.sort(key=lambda x: (-x[0], x[1]['title']))
-    return [item for _, item in scored]
+    ranked = [item for _, item in scored]
+
+    # ── 按需扩容：去重后结果过少时，智能增加渠道条数 ──────────────
+    # 触发条件（任意一个）：
+    #   1. 去重后总条数 < 8
+    #   2. 来源渠道数 < 3
+    #   3. 查询意图偏 broad（比较/对比/方案/调研/趋势/推荐）
+    #   4. 前5条标题相似度超过50%（被过滤掉的有价值条目）
+    ranked = _auto_scale(query, ranked, mode, all_results)
+
+    return ranked
 
 def fetch_content(results, limit=6):
     """
@@ -553,7 +637,7 @@ def detect_mode(query, explicit_mode):
     q = query.lower()
     # 热点词 → hot
     # 深度词 → deep（优先，防止被热点词覆盖）
-    deep_kw = ['分析', '对比', '横评', '评测', '哪个好', '为什么', '原理', '教程', '入门',
+    deep_kw = ['分析', '对比', '横评', '评测', '哪个好', '为什么', '原理', '入门',
                '最新动态', '最新消息', '最新发布']
     if any(k in q for k in deep_kw):
         return "deep", MODES["deep"]
@@ -574,11 +658,9 @@ def detect_mode(query, explicit_mode):
 def tier1_search(query, limit):
     """Tier-1：轻量快速，永远先跑"""
     funcs = [
-        # Tavily：直接入Tier-1，中英双语，高质量，~1s，比等Tier-2快
-        ("Tavily",     lambda: _timed_search("Tavily",     search_tavily,    query, limit)),
-        # 微博/B站热搜：按 query 简单过滤，不过滤则返全量（--hot 模式不过滤）
-        ("微博热搜", lambda: _timed_search("微博热搜", search_weibo_hot,   limit=limit, query=query)),
-        ("B站热门",  lambda: _timed_search("B站热门",  search_bilibili_hot, limit=limit, query=query)),
+        # 微博/B站热搜已移出 Tier-1（只代表"平台热点"，和 topical 查询几乎不相关）
+        # topical 搜索专注 Tavily（中文+英文高质量），Tier-2 补微信公众号+B站视频
+        ("Tavily", lambda: _timed_search("Tavily", search_tavily, query, limit)),
     ]
     return _run_parallel(funcs, timeout=25)
 
