@@ -57,6 +57,11 @@
 - **执行**：Node.js / Python3 / Shell
 - **定时任务**：Cron（需要配置）
 
+### cn_search.py 版本
+- **当前版本**：Stable v1.1.1（2026-04-19）
+- **评分**：8.3→8.7/10（meta问题修复后预估值）
+- **本次更新**：meta问题识别器（20/20准确度）+ 查询改写注入Tavily搜索 + Tier-2知乎追加
+
 ### OpenClaw 版本
 - **当前版本**：2026.4.15 (041266a)
 - **最新功能**：Claude Opus 4.7 图像理解、Google TTS (Gemini)、Memory/LanceDB 云存储、Control UI OAuth 状态卡片

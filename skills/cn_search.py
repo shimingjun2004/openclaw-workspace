@@ -798,7 +798,8 @@ def _is_meta_query(query):
         '本质', '怎么理解', '值不值得',
         '滥用', '误区', '哪些场景', '主要指', '主要因为', '为什么是',
         '要不要', '该不该', '是不是', '怎样选', '怎么选',
-        '识别', '判断', '区分', '怎么看', '如何区分',
+        '识别', '判断', '区分', '噪音', '精准', '怎么看', '如何区分',
+        '真方案', '包装词', '为什么', '为什么比',
     ]
     p = sum(1 for kw in primary if kw in q)
     if '适合什么' in q:
@@ -854,6 +855,45 @@ def _is_meta_query(query):
     return False
 
 
+
+
+def _is_framework_meta(query):
+    """
+    识别框架类 meta 问题。
+    这类问题问的是分工/维度/边界/框架，本质是"如何构建认知框架"，
+    需要知乎先给讨论框架，Tavily 跟着框架走。
+    """
+    q = query.lower()
+    framework_kw = [
+        '分工', '框架', '维度', '边界', '适合场景', '适合什么场景',
+        '如何区分', '真方案', '包装词', '主要指',
+        '哪类问题', '哪类能力', '各自优势', '各自特点', '各自适合',
+        '哪个更好', '哪个更重要', '哪个更', '识别', '滥用',
+    ]
+    return any(kw in q for kw in framework_kw)
+
+
+def _is_reason_priority_meta(query):
+    """
+    识别"原因/优先级型" meta 问题。
+
+    这类问题的特征是：问"为什么 X 比 Y 更关键"、"什么决定体验"、
+    "核心因素是什么"——本质是找因果关系/关键因素，不是找框架讨论。
+
+    这类题最怕知乎前置分流，最适合：一篇高质量文章直接命中。
+
+    命中这类关键词时，禁止知乎前置，恢复 Tavily 主搜路径。
+    """
+    q = query.lower()
+    reason_priority_kw = [
+        '为什么比', '为什么是', '为什么说',
+        '更重要', '更关键', '更核心',
+        '决定体验', '决定因素', '核心因素', '关键因素',
+        '优先看', '优先选择', '优先考虑',
+        '核心原因', '主要因为',
+    ]
+    return any(kw in q for kw in reason_priority_kw)
+
 def _rewrite_meta_query(query):
     """
     将 meta 问题改写为更适合搜索的查询词。
@@ -876,20 +916,19 @@ def _rewrite_meta_query(query):
                 "微信公众号 知乎 B站 GitHub 各自优势 讨论",
             ]
 
+    # ── 噪音/精准 场景类（优先！因为分工类条件也会匹配"适合场景"类query）────
+    if any(kw in q for kw in ['噪音', '精准']) and any(kw in q for kw in ['适合', '场景', '边界']):
+        return [
+            "搜索结果多噪音 精准 适用场景 知乎 经验",
+            "信息检索 召回率 精准率 取舍 场景分析",
+        ]
+
     # ── 能力/工具 分工类 ───────────────────
-    if any(kw in q for kw in ['分工', '区别', '各自', '适合什么']):
+    if any(kw in q for kw in ['分工', '区别', '框架', '维度', '边界']):
         if any(kw in q for kw in ['搜索', '热点', '调研']):
             return [
                 "搜索 热点监控 技术调研 场景 分工 分析",
                 "信息获取方式 场景选择 对比 经验",
-            ]
-
-    # ── 噪音/精准 场景类 ───────────────────
-    if any(kw in q for kw in ['噪音', '精准', '质量']):
-        if '场景' in q or '适合' in q:
-            return [
-                "搜索系统 噪音 精准 适用场景 经验",
-                "信息检索 精确度 噪音控制 方法",
             ]
 
     # ── 搜索质量 vs 模型参数 ────────────────
@@ -923,10 +962,8 @@ def _rewrite_meta_query(query):
 
     # ── 通用meta：加"分析/讨论/经验/观点"后缀 ─
     rewrites = []
-    meta_suffixes = ['分析', '讨论', '经验', '观点', '思考']
-    for suffix in meta_suffixes:
-        rewritten = query + ' ' + suffix
-        rewrites.append(rewritten)
+    for suffix in ['分析', '讨论', '经验', '观点', '思考']:
+        rewrites.append(query + ' ' + suffix)
     return rewrites[:2]
 
 
@@ -1057,7 +1094,10 @@ def deep_search(query, mode="normal", do_fetch=False):
 
     # ── Meta 查询改写：识别到meta问题时，用改写后的词搜Tavily ──────
     search_query = query
-    if _is_meta_query(query):
+    is_meta = _is_meta_query(query)
+    is_framework = is_meta and _is_framework_meta(query)
+
+    if is_meta:
         rewrites = _rewrite_meta_query(query)
         if rewrites:
             search_query = rewrites[0]  # 用改写词做第一轮搜索
@@ -1065,10 +1105,30 @@ def deep_search(query, mode="normal", do_fetch=False):
             for rw in rewrites[1:]:
                 print(f"         → 备选:「{rw}」")
 
-    # Tier-1 必须跑
-    t1 = time.time()
-    r1 = tier1_search(search_query, limit)
-    all_results.update(r1)
+    # ── 框架类 meta：知乎与 Tier-1 并行调用 ──────────────────────
+    # 注意：原因/优先级型 meta（如"为什么X比Y更重要"）禁止知乎前置
+    is_reason_priority = _is_reason_priority_meta(query)
+    zhihu_first = is_framework and not is_reason_priority
+
+    t1_start = time.time()
+    if zhihu_first:
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            f1 = executor.submit(tier1_search, search_query, limit)
+            f2 = executor.submit(search_zhihu_topic, query, limit)  # 用原词搜知乎
+            r1, r_zhihu = f1.result(), f2.result()
+        zhihu_results = {"知乎": r_zhihu} if r_zhihu else {}
+        all_results.update(r1)
+        all_results.update(zhihu_results)
+        t1_elapsed = time.time() - t1_start
+        zhihu_note = f"（框架类meta，知乎并行，{len(r_zhihu)}条）"
+    else:
+        # Tier-1 必须跑（普通meta 或 原因优先级型meta 都走这条路）
+        t1 = time.time()
+        r1 = tier1_search(search_query, limit)
+        all_results.update(r1)
+        zhihu_note = ""
+        t1_elapsed = time.time() - t1
 
     # 对 360 结果做噪音过滤（Priority 2）
     removed_noise = 0
@@ -1078,7 +1138,7 @@ def deep_search(query, mode="normal", do_fetch=False):
         all_results['360搜索'] = clean
         removed_noise = removed
 
-    print(f"  [Tier-1] {len(r1)}个渠道，用时{time.time()-t1:.1f}秒" +
+    print(f"  [Tier-1] {len(r1)}个渠道{zhihu_note}，用时{t1_elapsed:.1f}秒" +
           (f"（过滤360噪音{removed_noise}条）" if removed_noise else ""))
 
     # Tier-2 判断：mode强制 > 智能判断
