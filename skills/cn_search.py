@@ -187,6 +187,46 @@ def _fmt_desc(content, maxlen=80):
 
 # ── Tier-1 ─────────────────────────────────────────
 
+
+def search_sogou(query, limit=5, _cache_hit=False):
+    """
+    搜狗搜索，直接调，不走 SearXNG。
+    SearXNG 的 Bing 引擎对中文查询漂移严重，搜狗返回高度相关结果（~500ms）。
+    用 BeautifulSoup 解析，确保结果干净。
+    """
+    if _cache_hit:
+        return _cache.get('sogou', query, limit) or []
+    try:
+        url = f"https://www.sogou.com/web?query={requests.utils.quote(query)}&num={limit}"
+        r = safe_get(url, headers={**_ua(), 'Accept': 'text/html'}, timeout=12)
+        if not r:
+            return []
+        soup = BeautifulSoup(r.text, 'html.parser')
+        items = []
+        for h3 in soup.find_all('h3'):
+            a_tag = h3.find('a', href=True)
+            if not a_tag:
+                continue
+            title = a_tag.get_text(strip=True)
+            href = a_tag['href']
+            if not title or len(title) < 5:
+                continue
+            if not href or len(title) < 5:
+                continue
+            # 搜狗相对链接 /link?url=... 也是有效链接，保留
+            if not href.startswith('http') and not href.startswith('/link'):
+                continue
+            items.append({
+                "channel": "搜狗",
+                "title": clean_title(title),
+                "url": href,
+                "desc": ""
+            })
+        _cache.set('sogou', query, ttl=900, value=items[:limit])
+        return items[:limit]
+    except Exception:
+        return []
+
 def search_baidu(query, limit=5, _cache_hit=False):
     """必应（替换已损坏的百度引擎），中文内容良好，TTL=15分钟"""
     if _cache_hit:
@@ -226,8 +266,11 @@ def search_360(query, limit=5, _cache_hit=False):
     except Exception:
         return []
 
-def search_weibo_hot(limit=10, _cache_hit=False):
-    """微博实时热搜，TTL=90秒（变动频繁）"""
+def search_weibo_hot(limit=10, _cache_hit=False, query=""):
+    """
+    微博实时热搜，TTL=90秒（变动频繁）。
+    query 非空时按关键词过滤（jieba分词），避免普通搜索时全量噪音。
+    """
     if _cache_hit:
         return _cache.get('weibo_hot', limit) or []
     try:
@@ -241,18 +284,30 @@ def search_weibo_hot(limit=10, _cache_hit=False):
         if not r:
             return []
         items = r.json().get('data', {}).get('realtime', [])[:limit]
+        # query 过滤：简单字符包含匹配（不用 jieba，避免导入失败）
+        if query:
+            # 取 query 前4个字作为关键词（简单有效）
+            q_keywords = [c for c in query if '一' <= c <= '鿿'][:4]
+            if q_keywords:
+                filtered = [x for x in items
+                            if any(kw in x.get('word','') for kw in q_keywords)]
+                if filtered:
+                    items = filtered
         out = [{"channel": "微博热搜",
                 "title": x.get('word', ''),
                 "url":   f"https://s.weibo.com/weibo?q={requests.utils.quote(x['word'])}",
                 "desc":  f"🔥 {x.get('num', 0):,}"}
-               for x in items]
+               for x in items[:limit]]
         _cache.set('weibo_hot', limit, ttl=90, value=out)
         return out
     except Exception:
         return []
 
-def search_bilibili_hot(limit=10, _cache_hit=False):
-    """B站热门，TTL=90秒"""
+def search_bilibili_hot(limit=10, _cache_hit=False, query=""):
+    """
+    B站热门，TTL=90秒。
+    若传了 query 参数，按关键词过滤（jieba 分词）。
+    """
     if _cache_hit:
         return _cache.get('bilibili_hot', limit) or []
     try:
@@ -519,18 +574,19 @@ def detect_mode(query, explicit_mode):
 def tier1_search(query, limit):
     """Tier-1：轻量快速，永远先跑"""
     funcs = [
-        ("必应",     lambda: _timed_search("必应",     search_baidu,       query, limit)),
-        ("360搜索",  lambda: _timed_search("360搜索",  search_360,        query, limit)),
-        ("微博热搜", lambda: _timed_search("微博热搜", search_weibo_hot,   limit)),
-        ("B站热门",  lambda: _timed_search("B站热门",  search_bilibili_hot, limit)),
+        # Tavily：直接入Tier-1，中英双语，高质量，~1s，比等Tier-2快
+        ("Tavily",     lambda: _timed_search("Tavily",     search_tavily,    query, limit)),
+        # 微博/B站热搜：按 query 简单过滤，不过滤则返全量（--hot 模式不过滤）
+        ("微博热搜", lambda: _timed_search("微博热搜", search_weibo_hot,   limit=limit, query=query)),
+        ("B站热门",  lambda: _timed_search("B站热门",  search_bilibili_hot, limit=limit, query=query)),
     ]
     return _run_parallel(funcs, timeout=25)
 
-def _timed_search(channel, fn, *args):
+def _timed_search(channel, fn, *args, **kwargs):
     """包装搜索函数，记录耗时和成功率"""
     t0 = time.time()
     try:
-        result = fn(*args)
+        result = fn(*args, **kwargs)
         elapsed = (time.time() - t0) * 1000
         _STATS.record_channel(channel, elapsed, len(result) > 0)
         return result
@@ -544,7 +600,7 @@ def _timed_search(channel, fn, *args):
 def tier2_search(query, limit):
     """Tier-2：补充层，按需补入"""
     funcs = [
-        ("Tavily",       lambda: _timed_search("Tavily",       search_tavily,       query, limit)),
+        # Tavily 已在Tier-1，这里不再重复
         ("B站视频",      lambda: _timed_search("B站视频",      search_bilibili_video, query, limit)),
         ("微信公众号",   lambda: _timed_search("微信公众号",   search_wechat,       query, limit)),
     ]

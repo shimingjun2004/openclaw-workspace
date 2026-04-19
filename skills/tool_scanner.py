@@ -5,170 +5,132 @@
 
 职责：
 1. 扫描 ClawHub 新增 browser-automation / playwright skill
-2. 扫描 GitHub trending 是否有新型中文搜索方案
-3. 检查 SearXNG 百度引擎是否恢复
-4. 检查各核心渠道健康状态
-5. 发现重大更新写入 memory/tool-updates.md
+2. 扫描 GitHub 是否有新型中文搜索方案
+3. 检查 SearXNG 百度引擎是否恢复（连续2次才标红）
+4. 检查各核心渠道健康状态（连续2次失败才告警）
+5. 发现重大更新写入 memory/tool-updates.md 并推送
+
+告警阈值（必须遵守）：
+- 核心渠道：连续 ≥2 次失败才告警
+- 新 skill：ClawHub 评分 ≥3.6
+- GitHub 新方案：评分 ≥4.0
+- 百度恢复后再次失效：连续 ≥2 次才标红
 """
-import sys, time, subprocess, json, os
+import sys, time, subprocess, json, os, re
 from datetime import datetime
 
-LOG_FILE = "/root/.openclaw/workspace/memory/tool-updates.md"
-ALERT_THRESHOLD = 3.6  # ClawHub skill 评分门槛
+LOG_FILE    = "/root/.openclaw/workspace/memory/tool-updates.md"
+STATE_FILE  = "/root/.openclaw/workspace/memory/tool-scanner-state.json"
+ALERT_THRESHOLD = 3.6
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M')}] {msg}", flush=True)
 
-def write_update(findings):
-    """写入重大更新到 memory"""
-    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-    existing = ""
-    if os.path.exists(LOG_FILE):
-        existing = open(LOG_FILE).read()
+def load_state():
+    if os.path.exists(STATE_FILE):
+        try:
+            return json.loads(open(STATE_FILE).read())
+        except:
+            pass
+    return {}
 
+def save_state(state):
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, ensure_ascii=False)
+
+def write_update(findings):
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+    existing = open(LOG_FILE).read() if os.path.exists(LOG_FILE) else ""
     header = f"# 工具能力更新记录\n> 更新: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
     with open(LOG_FILE, "w") as f:
         f.write(header + findings + "\n\n" + existing)
-    log(f"已写入更新记录: {LOG_FILE}")
-
-def check_searxng_baidu():
-    """检查 SearXNG 百度引擎是否恢复"""
-    log("检查 SearXNG 百度引擎...")
-    try:
-        r = subprocess.run(
-            ["curl", "-s", "--max-time", "10",
-             "http://127.0.0.1:8080/search",
-             "--data-urlencode", "q=test",
-             "-d", "format=json&engines=baidu&limit=1"],
-            capture_output=True, text=True, timeout=15
-        )
-        results = json.loads(r.stdout).get("results", [])
-        count = len(results)
-        if count > 0:
-            msg = f"✅ 百度引擎恢复！可返回 {count} 条结果（建议改回百度引擎）"
-            log(msg)
-            return {"ok": True, "count": count, "msg": msg}
-        else:
-            log(f"百度引擎仍返回0条（维持必应替代）")
-            return {"ok": False, "count": 0}
-    except Exception as e:
-        log(f"百度引擎检查失败: {e}")
-        return {"ok": False, "error": str(e)}
+    log(f"已写入: {LOG_FILE}")
 
 def check_searxng_health():
-    """检查 SearXNG 整体健康状态"""
-    log("检查 SearXNG 健康状态...")
     try:
-        r = subprocess.run(
-            ["curl", "-s", "--max-time", "5", "http://127.0.0.1:8080/health"],
-            capture_output=True, text=True, timeout=8
-        )
-        if "ok" in r.stdout.lower() or "200" in r.stdout:
-            log("SearXNG: ✅ 健康")
-            return True
-        else:
-            log(f"SearXNG: ⚠️ 异常 {r.stdout[:50]}")
-            return False
-    except Exception as e:
-        log(f"SearXNG: ❌ 检查失败 {e}")
+        r = subprocess.run(["curl","-s","--max-time","5","http://127.0.0.1:8080/health"],
+            capture_output=True, text=True, timeout=8)
+        return "ok" in r.stdout.lower() or "200" in r.stdout
+    except:
         return False
 
-def check_owdaemon():
-    """检查 open-webSearch daemon"""
-    log("检查 open-webSearch daemon...")
+def check_daemon():
     try:
-        r = subprocess.run(
-            ["curl", "-s", "--max-time", "5", "http://127.0.0.1:18080/health"],
-            capture_output=True, text=True, timeout=8
-        )
-        if "\"ok\"" in r.stdout or "\"running\"" in r.stdout:
-            log("open-webSearch: ✅ 运行中")
-            return True
-        else:
-            log(f"open-webSearch: ⚠️ 异常 {r.stdout[:50]}")
-            return False
-    except Exception as e:
-        log(f"open-webSearch: ❌ 检查失败 {e}")
+        r = subprocess.run(["curl","-s","--max-time","5","http://127.0.0.1:18080/health"],
+            capture_output=True, text=True, timeout=8)
+        return "ok" in r.stdout.lower() or "running" in r.stdout
+    except:
         return False
 
 def check_tavily():
-    """检查 Tavily 是否正常"""
-    log("检查 Tavily...")
     try:
         from tavily import TavilyClient
         key = "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"
-        client = TavilyClient(api_key=key)
-        r = client.search(query="AI大模型2026", max_results=1)
-        count = len(r.get("results", []))
-        if count > 0:
-            log(f"Tavily: ✅ 正常 ({count}条)")
-            return True
-        else:
-            log("Tavily: ⚠️ 返回为空")
-            return False
-    except Exception as e:
-        log(f"Tavily: ❌ 失败 {e}")
+        c = TavilyClient(api_key=key)
+        r = c.search("test", max_results=1)
+        return len(r.get("results", [])) > 0
+    except:
         return False
 
+def check_baidu():
+    """检查 SearXNG 百度引擎，返回 (是否恢复, 条目数)"""
+    try:
+        r = subprocess.run(
+            ["curl","-s","--max-time","10",
+             "http://127.0.0.1:8080/search",
+             "--data-urlencode","q=test",
+             "-d","format=json&engines=baidu&limit=1"],
+            capture_output=True, text=True, timeout=15)
+        results = json.loads(r.stdout).get("results", [])
+        return len(results) > 0, len(results)
+    except:
+        return False, 0
+
 def scan_clawhub():
-    """扫描 ClawHub 新增 skill"""
-    log("扫描 ClawHub 新增 skill...")
+    log("扫描 ClawHub...")
     findings = []
     try:
         for keyword in ["browser-automation", "playwright", "MCP"]:
-            r = subprocess.run(
-                ["clawhub", "search", keyword],
-                capture_output=True, text=True, timeout=15
-            )
+            r = subprocess.run(["clawhub","search",keyword],
+                capture_output=True, text=True, timeout=20)
             if r.returncode == 0:
                 for line in r.stdout.split("\n"):
-                    parts = line.strip().split()
-                    if parts and parts[-1].replace(".","").replace("(","").replace(")","").replace(",","").replace(" ","").replace("\t","").replace("[","").replace("]","").replace("(","").replace(")","").replace(".","0").replace(" ","").replace("\t","").strip().endswith(")") or parts[-1].endswith(")"):
-                        pass
-                # 简单解析：取评分>阈值的行
-                for line in r.stdout.split("\n"):
-                    if any(word in line.lower() for word in ["browser", "playwright", "mcp"]):
-                        # 提取评分（格式：name 评分(x.XX)）
-                        import re
-                        scores = re.findall(r"\((\d\.\d{3})\)", line)
-                        for sc in scores:
-                            if float(sc) >= ALERT_THRESHOLD:
-                                findings.append(f"  [{keyword}] {line.strip()} (评分 {sc})")
+                    scores = re.findall(r"\((\d\.\d{3})\)", line)
+                    for sc in scores:
+                        if float(sc) >= ALERT_THRESHOLD:
+                            findings.append(f"  [{keyword}] {line.strip()}")
     except Exception as e:
         log(f"ClawHub 扫描失败: {e}")
-
     if findings:
-        msg = "发现高评分 skill:\n" + "\n".join(findings)
-        log(msg)
+        log(f"ClawHub: 发现 {len(findings)} 个高分 skill")
     else:
         log("ClawHub: 无重大新增")
     return findings
 
 def scan_github():
-    """扫描 GitHub 是否有新型中文搜索方案"""
-    log("扫描 GitHub trending...")
+    log("扫描 GitHub...")
     findings = []
     try:
-        # 搜索中文搜索相关热门仓库
-        for query in ["chinese search tool", "中文搜索 python", "search engine china github"]:
+        for query in ["chinese search tool", "中文搜索 python"]:
             r = subprocess.run(
-                ["gh", "search", "repos", query, "--sort", "stars", "--limit", "3",
-                 "--json", "name,description,url,stars"],
-                capture_output=True, text=True, timeout=15
-            )
+                ["gh","search","repos",query,"--sort","stars","--limit","3",
+                 "--json","name,description,url,stars"],
+                capture_output=True, text=True, timeout=20)
             if r.returncode == 0:
                 try:
                     items = json.loads(r.stdout)
                     for it in items:
-                        stars = it.get("stars", 0)
-                        if stars > 100:
-                            findings.append(f"  {it['name']} ⭐{stars}: {it.get('description','')[:60]}")
+                        if it.get("stars", 0) > 200:
+                            findings.append(
+                                f"  {it['name']} ⭐{it['stars']}: "
+                                f"{it.get('description','')[:60]}")
                 except:
                     pass
     except Exception as e:
         log(f"GitHub 扫描失败: {e}")
     if findings:
-        log(f"GitHub: 发现 {len(findings)} 个潜在相关项目")
+        log(f"GitHub: 发现 {len(findings)} 个潜在项目")
     return findings
 
 # ── 主流程 ─────────────────────────────────────────
@@ -178,41 +140,72 @@ def main():
     log("中文搜索系统工具扫描开始")
     log("=" * 50)
 
+    prev = load_state()
     all_findings = []
 
-    # 1. 核心渠道健康检查
-    health_ok = True
-    if not check_searxng_health():
-        all_findings.append("⚠️ SearXNG 异常，请检查容器")
-        health_ok = False
+    # ── 1. 核心渠道健康检查（连续2次才告警）───────────
+    searxng_ok  = check_searxng_health()
+    daemon_ok   = check_daemon()
+    tavily_ok   = check_tavily()
 
-    if not check_owdaemon():
-        all_findings.append("⚠️ open-webSearch daemon 异常")
-        health_ok = False
+    prev_searxng = prev.get("searxng_fails", 0)
+    prev_daemon  = prev.get("daemon_fails", 0)
+    prev_tavily  = prev.get("tavily_fails", 0)
 
-    if not check_tavily():
-        all_findings.append("⚠️ Tavily 异常，请检查 API Key")
-        health_ok = False
+    curr_searxng = prev_searxng + 1 if not searxng_ok else 0
+    curr_daemon  = prev_daemon  + 1 if not daemon_ok   else 0
+    curr_tavily  = prev_tavily  + 1 if not tavily_ok   else 0
 
-    # 2. 百度引擎检查
-    baidu_check = check_searxng_baidu()
-    if baidu_check.get("ok"):
-        all_findings.append(f"✅ 百度引擎已恢复（可替换必应）: {baidu_check['msg']}")
+    if curr_searxng >= 2:
+        all_findings.append(f"⚠️ SearXNG 异常（连续{curr_searxng}次失败），请检查容器")
+    if curr_daemon >= 2:
+        all_findings.append(f"⚠️ open-webSearch daemon 异常（连续{curr_daemon}次失败）")
+    if curr_tavily >= 2:
+        all_findings.append(f"⚠️ Tavily 异常（连续{curr_tavily}次失败），请检查 API Key")
 
-    # 3. ClawHub skill 扫描
+    # ── 2. 百度引擎（恢复后再次失效才标红）───────────
+    baidu_ok, baidu_count = check_baidu()
+    prev_baidu_ok = prev.get("baidu_ok", False)
+
+    if baidu_ok:
+        if not prev_baidu_ok:
+            all_findings.append(f"✅ 百度引擎已恢复！可返回 {baidu_count} 条结果（建议下一轮切回）")
+        # 保存：曾经恢复过，现在正常
+        prev_baidu_recover_fails = 0
+    else:
+        if prev_baidu_ok:
+            # 曾经恢复过，现在失效
+            prev_baidu_recover_fails = prev.get("baidu_recover_fails", 0) + 1
+            if prev_baidu_recover_fails >= 2:
+                all_findings.append(f"⚠️ 百度引擎再次失效（连续{prev_baidu_recover_fails}次），已切回必应")
+        else:
+            prev_baidu_recover_fails = prev.get("baidu_recover_fails", 0)
+
+    # ── 3. ClawHub ───────────────────────────────────
     clawhub_findings = scan_clawhub()
     if clawhub_findings:
         all_findings.append("ClawHub 高分 skill:\n" + "\n".join(clawhub_findings))
 
-    # 4. GitHub 扫描
+    # ── 4. GitHub ────────────────────────────────────
     github_findings = scan_github()
     if github_findings:
         all_findings.append("GitHub 潜在相关项目:\n" + "\n".join(github_findings[:5]))
 
-    # 5. 汇总报告
+    # ── 5. 保存状态 ─────────────────────────────────
+    curr_state = {
+        "searxng_fails": curr_searxng,
+        "daemon_fails": curr_daemon,
+        "tavily_fails": curr_tavily,
+        "baidu_ok": baidu_ok,
+        "baidu_recover_fails": prev_baidu_recover_fails if not baidu_ok else 0,
+        "last_run": datetime.now().isoformat(),
+    }
+    save_state(curr_state)
+
+    # ── 6. 汇总 ─────────────────────────────────────
     log("=" * 50)
     if all_findings:
-        log("📋 发现以下需要关注的事项:")
+        log("📋 需要关注的事项:")
         for f in all_findings:
             log(f"  {f}")
         report = "# 工具扫描报告\n"
@@ -220,7 +213,6 @@ def main():
         for f in all_findings:
             report += f"- {f}\n"
         write_update(report)
-        log("已写入 memory/tool-updates.md")
     else:
         log("✅ 无重大发现，系统状态正常")
 
