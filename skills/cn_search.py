@@ -406,6 +406,34 @@ def search_wechat(query, limit=5, _cache_hit=False):
 
 # ── Tier-3 ─────────────────────────────────────────
 
+
+def search_zhihu_topic(query, limit=5, _cache_hit=False):
+    """
+    知乎话题搜索（meta问题专用，不走 Tavily，直接搜知乎）。
+    通过 Tavily site:zhuanlan.zhihu.com 获取知乎视角的讨论/分析/观点。
+    """
+    if _cache_hit:
+        return _cache.get('zhihu_topic', query, limit) or []
+    try:
+        from tavily import TavilyClient
+        key = "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"
+        client = TavilyClient(api_key=key)
+        # 知乎站内搜索
+        r = client.search(f"site:zhuanlan.zhihu.com {query}", max_results=limit)
+        results = r.get("results", [])
+        out = [{
+            "channel": "知乎",
+            "title": x.get("title", ""),
+            "url": x.get("url", ""),
+            "desc": x.get("content", "")[:200]
+        } for x in results]
+        _cache.set('zhihu_topic', query, ttl=900, value=out)
+        return out
+    except Exception:
+        return []
+
+
+
 def search_github(query, limit=5):
     """GitHub 仓库搜索，TTL=60分钟（单独命令，不走 HTTP）"""
     try:
@@ -759,6 +787,149 @@ def _title_similarity(t1, t2):
         return 0.0
     return len(s1 & s2) / len(s1 | s2)
 
+
+def _is_meta_query(query):
+    q = query.lower()
+
+    # ── 主要 meta 词 ───────────────────────────
+    primary = [
+        '区别', '对比', '分工',
+        '各自适合',
+        '本质', '怎么理解', '值不值得',
+        '滥用', '误区', '哪些场景', '主要指', '主要因为', '为什么是',
+        '要不要', '该不该', '是不是', '怎样选', '怎么选',
+        '识别', '判断', '区分', '怎么看', '如何区分',
+    ]
+    p = sum(1 for kw in primary if kw in q)
+    if '适合什么' in q:
+        p += 1
+
+    # ── 次要 meta 词计数 ──────────────────────
+    s = 0
+    if '为什么说' in q:
+        s += 1
+    if '哪个更好' in q:
+        s += 1
+    elif '哪个更重要' in q:
+        s += 1
+    elif '哪个更' in q:
+        s += 1
+    if '更适合' in q and '更好' not in q and '更重要' not in q:
+        s += 1
+
+    # ── 技术工具/框架名 ─────────────────────
+    tech_products = [
+        'autogen','openhands','langchain','dify','crewai',
+        'fastgpt','qanything','ragflow','coze','n8n',
+        'vllm','sglang','deepseek','qwen','kimi','gpt-',
+        '文心','通义','智谱','豆包','chatgpt','claude','gemini',
+        'python','java','rust','golang','mysql','postgresql',
+        'mongodb','redis','docker','kubernetes','k8s',
+        'fastapi','flask','django','spring','vue','react',
+    ]
+    has_tech_prod = any(pp in q for pp in tech_products)
+
+    # ── 明确排除 ─────────────────────────────
+    if any(n in q for n in ['最新','最新消息','最新进展','2026年']):
+        return False
+    if any(t in q for t in ['教程','教学','安装','部署','配置']):
+        return False
+
+    # ── 核心判断 ─────────────────────────────
+    # 有技术产品名 + primary meta词 → 技术选型，非meta
+    if has_tech_prod and p >= 1:
+        return False
+    # 有技术产品名 + "哪个更好" → 技术选型，非meta
+    if has_tech_prod and '哪个更好' in q:
+        return False
+    # 有"哪个更重要"（无产品名干扰）→ 抽象比较问题，meta
+    if '哪个更重要' in q and not has_tech_prod:
+        return True
+    # 主要meta词>=1 → meta问题
+    if p >= 1:
+        return True
+    # 次要meta词>=2 → meta问题
+    if s >= 2:
+        return True
+    return False
+
+
+def _rewrite_meta_query(query):
+    """
+    将 meta 问题改写为更适合搜索的查询词。
+    原则：把"问概念"变成"找分析/讨论/经验"。
+
+    例如：
+      "公众号/知乎/B站/GitHub 各自适合什么"
+        → ["公众号 知乎 适用场景 分析", "内容平台适用场景 对比"]
+
+      "搜索质量 vs 模型参数 哪个更重要"
+        → ["搜索结果质量 企业AI体验 讨论", "AI助手 效果 决定因素 分析"]
+    """
+    q = query.lower()
+
+    # ── 平台来源类 meta ─────────────────────
+    if any(kw in q for kw in ['公众号', '知乎', 'b站', 'bilibili', 'github']):
+        if any(kw in q for kw in ['适合', '各自', '比较', '对比']):
+            return [
+                "内容平台 适用场景 对比 分析",
+                "微信公众号 知乎 B站 GitHub 各自优势 讨论",
+            ]
+
+    # ── 能力/工具 分工类 ───────────────────
+    if any(kw in q for kw in ['分工', '区别', '各自', '适合什么']):
+        if any(kw in q for kw in ['搜索', '热点', '调研']):
+            return [
+                "搜索 热点监控 技术调研 场景 分工 分析",
+                "信息获取方式 场景选择 对比 经验",
+            ]
+
+    # ── 噪音/精准 场景类 ───────────────────
+    if any(kw in q for kw in ['噪音', '精准', '质量']):
+        if '场景' in q or '适合' in q:
+            return [
+                "搜索系统 噪音 精准 适用场景 经验",
+                "信息检索 精确度 噪音控制 方法",
+            ]
+
+    # ── 搜索质量 vs 模型参数 ────────────────
+    if any(kw in q for kw in ['搜索质量', '结果质量']) and any(kw in q for kw in ['参数', '模型大小', '模型参数']):
+        return [
+            "搜索增强 AI助手 效果 决定因素 分析",
+            "企业AI 搜索质量 体验 关键讨论",
+        ]
+
+    # ── 技术 vs 营销 ─────────────────────────
+    if any(kw in q for kw in ['技术', '营销']) and any(kw in q for kw in ['区别', '识别', '判断']):
+        return [
+            "AI技术突破 营销 区分方法 讨论",
+            "AI真实进展 噱头 判断 经验",
+        ]
+
+    # ── 智能体滥用 ─────────────────────────
+    if any(kw in q for kw in ['滥用', '误区']):
+        if '智能体' in q or 'agent' in q:
+            return [
+                "AI智能体 滥用 场景 讨论",
+                "智能体 乱用 误区 行业看法",
+            ]
+
+    # ── 企业级AI ─────────────────────────
+    if '企业级ai' in q or '企业ai' in q:
+        return [
+            "企业AI 内涵 外延 产品形态 分析",
+            "AI中台 实质 价值 讨论",
+        ]
+
+    # ── 通用meta：加"分析/讨论/经验/观点"后缀 ─
+    rewrites = []
+    meta_suffixes = ['分析', '讨论', '经验', '观点', '思考']
+    for suffix in meta_suffixes:
+        rewritten = query + ' ' + suffix
+        rewrites.append(rewritten)
+    return rewrites[:2]
+
+
 def _detect_query_intent(query):
     """识别查询意图类型"""
     q = query.lower()
@@ -884,9 +1055,19 @@ def deep_search(query, mode="normal", do_fetch=False):
     t0 = time.time()
     all_results = {}
 
+    # ── Meta 查询改写：识别到meta问题时，用改写后的词搜Tavily ──────
+    search_query = query
+    if _is_meta_query(query):
+        rewrites = _rewrite_meta_query(query)
+        if rewrites:
+            search_query = rewrites[0]  # 用改写词做第一轮搜索
+            print(f"  [Meta] 检测到元问题，改写查询:「{search_query}」")
+            for rw in rewrites[1:]:
+                print(f"         → 备选:「{rw}」")
+
     # Tier-1 必须跑
     t1 = time.time()
-    r1 = tier1_search(query, limit)
+    r1 = tier1_search(search_query, limit)
     all_results.update(r1)
 
     # 对 360 结果做噪音过滤（Priority 2）
@@ -933,6 +1114,15 @@ def deep_search(query, mode="normal", do_fetch=False):
     ranked = deduplicate_and_rank(all_results)
     total_discovered = len(ranked)
     print(f"📋 去重后共 {total_discovered} 条（已按质量权重排序）")
+
+    # ── Meta 问题处理：改写查询 + 调来源偏置 ─────────────
+    if _is_meta_query(query):
+        print(f"  [Meta] 检测到元问题，启动分析模式")
+        rewrites = _rewrite_meta_query(query)
+        if rewrites:
+            print(f"  [Meta] 查询改写: {query!r}")
+            for rw in rewrites[:2]:
+                print(f"         → {rw!r}")
 
     # ── 分渠道输出 ──────────────────────────────
     print(f"\n{'─'*58}")
